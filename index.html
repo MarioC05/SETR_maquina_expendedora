@@ -1,13 +1,452 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Máquina expendedora</title>
-
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Práctica: Máquina expendedora de café</title>
+  <style>
+    :root { color-scheme: light; }
+    body {
+      max-width: 950px; margin: 40px auto; padding: 0 24px;
+      font-family: Arial, Helvetica, sans-serif; line-height: 1.65;
+      color: #222; background: #fff;
+    }
+    h1 { font-size: 2rem; margin-bottom: 1.5rem; }
+    h2 { margin-top: 2.2rem; padding-bottom: .35rem; border-bottom: 2px solid #ddd; }
+    h3 { margin-top: 1.8rem; }
+    h4 { margin-top: 1.5rem; font-size: 1.1rem; }
+    p { margin: .8rem 0; }
+    ul { padding-left: 1.5rem; }
+    li { margin: .25rem 0; }
+    pre {
+      overflow-x: auto; padding: 16px; border-radius: 8px;
+      background: #f4f4f4; border: 1px solid #ddd;
+      line-height: 1.4; font-size: .92rem;
+    }
+    code { font-family: Consolas, Monaco, monospace; }
+    .placeholder { color: #555; font-style: italic; }
+  </style>
 </head>
 <body>
-    <h1>Maquina expendedora</h1>
-    <p>Por Mario Casero Sández</p>
+  <h1>Práctica: Máquina expendedora de café</h1>
+<h2>1. INTRODUCCIÓN</h2>
+<p>El objetivo de esta práctica es la creación de una máquina de café usando un &quot;Super Starter Kit UNO R3 Project&quot; de Arduino. hemos usado estos componentes:</p>
+<ul>
+<li>Arduino UNO</li>
+<li>Pantalla LCD</li>
+<li>Módulo Joystick</li>
+<li>Sensor de Temperatura y Humedad DHT11.</li>
+<li>Sensor de Distancia por Ultrasonidos</li>
+<li>Pulsador / Botón externo.</li>
+<li>2 LEDs estándar</li>
+</ul>
+<p>Gracias a ellos, hemos implementado las siguientes funcionalidades:</p>
+<ul>
+<li>Modo arranque con un led que nos indique cuánto falta por medio de parpadeos.</li>
+<li>Detector de presencia que inicie la máquina cuando alguien se acerque.</li>
+<li>Display de productos y precios por el que se pueda navegar.</li>
+<li>Indicador de cuánto falta para terminar el café por medio de un led que cambia su intensidad.</li>
+<li>Modo admin que permite visualizar los sensores libremente además de modificar los precios.</li>
+</ul>
+<p>Ahora explicaremos como hemos afrontado los retos y explicaremos las partes del código más importantes.</p>
+<h2>2. SOLUCIÓN PROPUESTA</h2>
+<h3>2.1 ESTRUCTURA DEL CÓDIGO</h3>
+<p>Al tener la máquina de café varios modos de funcionamiento, de los cuales se pueden pasar de uno a otro dependiendo de ciertos eventos, he optado por realizar una máquina de estados. Para mantener la reactividad del sistema, hemos realizado la mayor parte del código dentro del loop principal, donde en cada ciclo comprobaremos en que estado estamos, y ejecutaremos el código acorde. Para complementar la reactividad del sistema, hemos hecho uso de ArduinoThreads y un controlador para manejarlos, para así poder evitar el uso de delays sin tener necesariamente que ejecutar el código de cada modo en todos y cada uno de los bucles. Las únicas acciones que no se realizan en bucle son las del setup, que incluyen inicialización de pines, asignación de callbacks y periodos a los threads y creación de interrupciones hardware. Normalmente, cada estado tiene un solo thread asociado, y este a su vez se fija en un solo sensor. Las únicas excepciones son el thread que se encarga de mirar el botón externo (pues sirve para cambiar de modo independientemente del estado actual), y el estado ADMIN_ACTION, que se le pueden asociar hasta 4 threads diferentes (ya lo veremos en profundidad más adelante). La función de la máquina de estados casi siempre se limita a activar y desactivar threads en el controlador, y luego son estos threads los que se encargan de gestionar cuando se pasa al siguiente estado. A veces, sin embargo, la máquina de estados se puede encargar de comprobaciones más simples que no requieran lectura constante de sensores, como comprobar si ha pasado cierto tiempo desde que entro a ese estado. La única interrupción hardware es la del botón incluido en el joystick. Para evitar romper la reactividad, en ella simplemente cambiamos un booleano que nos indica que el joystick se ha pulsado. Esta variable se comprobará luego en los threads pertinentes. Para evitar que una pulsación erronea del joystick cuando no tocaba modifique comportamientos futuros, se restablece el valor de esta variable automáticamente cada 2 segundos, junto con otras variables que tienen el mismo problema.</p>
+<pre><code>void joyClick() {
+joystickClicked = true;
+}</code></pre>
+<p>Ahora explicaremos cada estado en mayor profundidad.</p>
+<h3>2.2 ESTADOS</h3>
+<h4>ARRANQUE:</h4>
+<p>Es el estado que se ejecuta nada más encender la placa. En este estado habilitamos el siguiente thread con periodo de 1 segundo:</p>
+<pre><code>void ledBlink() {
+
+if(n_blink &lt; 3){
+
+led1state = !led1state;
+
+digitalWrite(LED1, led1state);
+
+if (!led1state) {
+n_blink++;
+}
+
+} else {
+
+state = SERVICIO;
+
+}
+
+}
+
+Este código se encarga de ir alternando un led de encendido y apagado cada vez que se ejecuta (1 segundo). Cuando se repita el parpadeo 3 veces, se pasa al siguiente estado.</code></pre>
+<h4>SERVICIO:</h4>
+<p>Este estado ocurre tras el arranque y siempre que se resetea por medio del botón externo. Aquí está el código asociado:</p>
+<pre><code>void detectPeople() {
+
+digitalWrite(TRIG, LOW);
+delayMicroseconds(2);
+
+digitalWrite(TRIG, HIGH);
+delayMicroseconds(10);
+digitalWrite(TRIG, LOW);
+
+unsigned long echo = pulseIn(ECHO, HIGH, 30000);
+
+//vel sonido = 343m/s
+float dist = echo / 58.0;
+
+if (dist &gt; 0 &amp;&amp; dist &lt; 100) {
+
+state = SERVICIO_TEMP;
+
+}
+
+}
+
+Con el detector de ultrasonidos, esperamos 2 ms con el emisor apagado para estabilizar la señal, luego mandamos una onda por 10 ms. Tras ello, recibimos por el receptor durante 30 ms por si rebota la señal. Si conseguimos detectar
+algo, usamos la fórmula para convertir el tiempo transcurrido en distancia, y comprobamos si está a menos de 1 metro. Si la respuesta es afirmativa, pasamos al siguiente estado. Este es el único estado que rompe ligeramente la
+reactividad del programa usando delayMicroseconds, pero solo durante 42 ms.</code></pre>
+<h4>SERVICIO_TEMP:</h4>
+<p>Este estado dura 4 segundos, los cuales comprobaremos dentro del propio loop usando la función millis(), y comparándola con el tiempo que obtuvimos al entrar en el estado. mientras tanto, mostraremos la temperatura y la humedad con este código que se ejecutará cada 1 segundo, pues el DHT no cambia su detección con mucha frecuencia:</p>
+<pre><code>void checkTemp() {
+
+if ((millis() - last_time) &lt;= 5000) {
+
+float t = dht.readTemperature();
+float h = dht.readHumidity();
+
+lcd.setCursor(0, 0);
+lcd.print(&quot;Temp: &quot;);
+lcd.print(t);
+lcd.print(&quot; C   &quot;);
+Serial.print(&quot;Temp: &quot;);
+Serial.print(t);
+Serial.println(&quot;C&quot;);
+
+lcd.setCursor(0, 1);
+lcd.print(&quot;Humedad: &quot;);
+lcd.print(h);
+lcd.print(&quot; %   &quot;);
+Serial.print(&quot;Humedad: &quot;);
+Serial.print(h);
+Serial.println(&quot;%&quot;);
+
+} else {
+
+state = SERVICIO_SELECT;
+
+}
+
+}</code></pre>
+<h4>SERVICIO_SELECT:</h4>
+<p>Una vez pasados los 4 segundos, entraremos en este estado en el que mostraremos por pantalla los productos y sus precios. Para moverse por ella, veremos si el valor del eje y del joystick se aleja mucho del centro por arriba y por abajo. El periodo de este checkeo es de 500 ms, ni mucho, para que no tarde en cambiar de producto, ni muy poco, para que no cambie demasiado deprisa y no podamos controlarlo.</p>
+<pre><code>void selectDrink() {
+
+int joy_y = analogRead(JOY_Y);
+
+if (joy_y &lt; 312) {
+if (n_drink &gt; 0){
+n_drink--;
+}
+}
+
+if (joy_y &gt; 712) {
+if (n_drink &lt; 4){
+n_drink++;
+}
+}
+
+if (n_drink != last_n_drink){
+
+lcd.clear();
+
+lcd.setCursor(0, 0);
+lcd.print(drinks[n_drink]);
+Serial.print(drinks[n_drink]);
+
+lcd.setCursor(0, 1);
+lcd.print(price[n_drink], 2);
+lcd.print(&quot; EUR&quot;);
+Serial.print(price[n_drink]);
+Serial.println(&quot;EUR&quot;);
+
+last_n_drink = n_drink;
+}
+
+}
+
+Solo actualizaremos la placa cuando se cambie de bebida para evitar parpadeos innecesarios. Para seleccionar una bebida, comprobaremos la interrupción hardware del botón en el joystick que mencionamos antes. Esto lo haremos fuera del
+thread, en la máquina de estados, para no tener que esperar a que se ejecute.
+
+if (joystickClicked) {
+
+joystickClicked = false;
+
+state = SERVICIO_PREP;
+
+}</code></pre>
+<h4>SERVICIO_PREP:</h4>
+<p>Una vez se seleccione la bebida, la prepararemos durante un intervalo de tiempo aleatorio entre 4 y 8 segundos. Para mostrar el progreso, cambiaremos la intensidad de un led según el porcentaje de completitud:</p>
+<pre><code>void increaseBright() {
+
+if ((millis() - last_time) &lt;= prep_time){
+
+int bright = map((millis()-last_time), 0, prep_time, 0, 255);
+
+bright = constrain(bright, 0, 255);
+
+analogWrite(LED2, bright);
+
+} else {
+
+state = SERVICIO_WAIT;
+last_time = 0;
+
+}
+
+}</code></pre>
+<h4>SERVICIO_WAIT:</h4>
+<p>Cuando termine de hacerse el café, simplemente esperaremos 3 segundos a que se retire la bebida, y luego volveremos a pasar a SERVICIO. No hay ningún thread asociado a este estado.</p>
+<h4>ADMIN:</h4>
+<p>A este estado se accede gracias al botón externo, y se puede volver de él al estado servicios de la misma manera. En el, tenemos un selector de opciones que funciona similar el selector de bebidas, comprobando el joystick para poder pasar por todas las acciones disponibles:</p>
+<pre><code>void adminMenu() {
+
+int joy_y = analogRead(JOY_Y);
+
+if (joy_y &lt; 312) {
+if (n_action &gt; 0){
+n_action--;
+}
+}
+
+if (joy_y &gt; 712) {
+if (n_action &lt; 3){
+n_action++;
+}
+}
+
+if (n_action != last_n_action){
+
+lcd.clear();
+
+lcd.setCursor(0, 0);
+lcd.print(actions[n_action]);
+Serial.println(actions[n_action]);
+
+last_n_action = n_action;
+}
+
+}
+
+Sin embargo, a diferencia del selector de bebidas, que no cambia su funcionamiento según la bebida que elijas, aquí si que importará el modo seleccionado. Una vez presiones el joystick (comprobado del mismo modo que antes) entraremos al
+estado ADMIN_ACTION, pero habilitaremos un thread diferente dependiendo de la acción elegida.</code></pre>
+<h4>ADMIN_ACTION:</h4>
+<p>Como hemos mencionado antes, este estado puede tener 4 threads diferente asociados. La cosa en común que todos tienen es que si giras el joystick a la izquierda, volverá al estado anterior. Los estados son los siguientes:</p>
+<p>1) Muestra la temperatura y la humedad:</p>
+<pre><code>void adminDHT(){
+
+float t = dht.readTemperature();
+float h = dht.readHumidity();
+
+lcd.clear();
+
+lcd.setCursor(0, 0);
+lcd.print(&quot;Temp: &quot;);
+lcd.print(t);
+lcd.print(&quot; C   &quot;);
+Serial.print(&quot;Temp: &quot;);
+Serial.print(t);
+Serial.println(&quot;C&quot;);
+
+lcd.setCursor(0, 1);
+lcd.print(&quot;Humedad: &quot;);
+lcd.print(h);
+lcd.print(&quot; %   &quot;);
+Serial.print(&quot;Humedad: &quot;);
+Serial.print(h);
+Serial.println(&quot;%&quot;);
+
+}
+
+2) Muestra la distancia percibida por el ultrasonidos:
+
+void adminUltrasonic(){
+
+digitalWrite(TRIG, LOW);
+delayMicroseconds(2);
+
+digitalWrite(TRIG, HIGH);
+delayMicroseconds(10);
+digitalWrite(TRIG, LOW);
+
+unsigned long echo = pulseIn(ECHO, HIGH, 30000);
+
+//vel sonido = 343m/s
+float dist = echo / 58.0;
+
+lcd.clear();
+
+lcd.setCursor(0, 0);
+lcd.print(&quot;Dist:&quot;);
+lcd.setCursor(0, 1);
+lcd.print(dist);
+Serial.print(&quot;Dist:&quot;);
+Serial.println(dist);
+
+}
+
+3) Muestra el tiempo desde que se inició la placa en segundos:
+
+void adminTime(){
+
+unsigned long sec = millis() / 1000;
+
+lcd.clear();
+
+lcd.setCursor(0, 0);
+lcd.print(&quot;Time: &quot;);
+lcd.setCursor(0, 1);
+lcd.print(sec);
+Serial.print(&quot;Time:&quot;);
+Serial.println(sec);
+
+}
+
+4) Permite cambiar los precios. Es el más complejo de los 4 así que lo explicaremos más a fondo:
+
+void adminPrices(){
+
+int joy_x = analogRead(JOY_X);
+int joy_y = analogRead(JOY_Y);
+
+if (joy_x &gt; 712) {
+if (n_drink &lt; 4){
+n_drink++;
+} else {
+n_drink = 0;
+}
+}
+
+if (joy_y &lt; 312) {
+if (new_price[n_drink] &gt; 0){
+new_price[n_drink] = new_price[n_drink] - 0.05;
+}
+}
+
+if (joy_y &gt; 712) {
+new_price[n_drink] = new_price[n_drink] + 0.05;
+}
+
+if (n_drink != last_n_drink || new_price[n_drink] != last_new_price){
+
+lcd.clear();
+
+lcd.setCursor(0, 0);
+lcd.print(drinks[n_drink]);
+Serial.print(drinks[n_drink]);
+
+lcd.setCursor(0, 1);
+lcd.print(new_price[n_drink], 2);
+lcd.print(&quot; EUR&quot;);
+Serial.print(new_price[n_drink]);
+Serial.println(&quot;EUR&quot;);
+
+last_n_drink = n_drink;
+last_new_price = new_price[n_drink];
+}
+
+if (joystickClicked){
+joystickClicked = false;
+
+price[0] = new_price[0];
+price[1] = new_price[1];
+price[2] = new_price[2];
+price[3] = new_price[3];
+}
+
+}
+
+Cuando entremos en esta acción, nos crearemos una copia del listado de precios actuales. El display es parecido al selector de bebidas, pero el eje y del joystick servirá para bajar o subir los precios de 0.05 en 0.05. Para movernos
+entre las bebidas, en cambio, moveremos el joystick a la derecha como el joystick hacia la izquierda está reservado para cancelar la acción, simplemente hemos cerrado el lazo de las bebidas para que puedas volver atrás). Cuando
+pulsemos el joystick, todos los cambios en los quedarán guardados y se verán cuando volvamos a iniciar el modo de servicios.</code></pre>
+<h4>Botón Externo:</h4>
+<p>Pese a no ser un estado como tal, merece la pena explicarlo. Este es el único thread que está activo siempre:</p>
+<pre><code>void checkButton() {
+
+bool buttonState = digitalRead(BUTTON);
+
+if (buttonState == LOW &amp;&amp; !buttonPressed) {
+
+buttonPressed = true;
+start_press = millis();
+
+}
+
+if (buttonState == HIGH &amp;&amp; buttonPressed) {
+
+buttonPressed = false;
+total_press = millis() - start_press;
+
+}
+
+}
+
+Se ejecuta con un periodo de solo 100 ms y comprueba si el botón está pulsado. La próxima vez que se ejecute y el botón ya no esté pulsado, calculará el intervalo de tiempo que ha estado pulsado, y usará el valor obtenido para cambiar
+de estados según las especificaciones de la práctica:
+
+if(total_press &gt; 2000 &amp;&amp; total_press &lt; 3000) {
+state = SERVICIO;
+total_press = 0;
+
+led2Thread.enabled = false;
+analogWrite(LED2, 0);
+}
+
+if(total_press &gt;= 5000) {
+
+if (state != ADMIN &amp;&amp; state != ADMIN_ACTION){
+
+state = ADMIN;
+
+digitalWrite(LED1, HIGH);
+digitalWrite(LED2, HIGH);
+
+total_press = 0;
+
+led1Thread.enabled = false;
+ultrasonicThread.enabled = false;
+dhtThread.enabled = false;
+joyThread.enabled = false;
+led2Thread.enabled = false;
+
+} else {
+
+state = SERVICIO;
+
+digitalWrite(LED1, LOW);
+digitalWrite(LED2, LOW);
+
+total_press = 0;
+
+joyAdminThread.enabled = false;
+dhtAdminThread.enabled = false;
+ultrasonicAdminThread.enabled = false;
+timeAdminThread.enabled = false;
+priceAdminThread.enabled = false;
+}
+
+}</code></pre>
+<h4>Watchdog:</h4>
+<p>Además del funcionamiento base, hemos implementado un watchdog al programa, que comprueba si este se ha bloqueado. Para ello, ejecutamos este comando en cada bucle:</p>
+<pre><code>wdt_reset();
+
+Si este comando no se ejecuta como mínimo cada 2 segundos valor que hemos asignado nosotros), entenderemos que el programa se ha bloqueado y se reiniciará la placa</code></pre>
+<h2>3. CIRCUITO</h2>
+<p class="placeholder"><strong>#Foto esquema circuito</strong></p>
+<p class="placeholder"><strong>#Foto circuito real</strong></p>
+<h2>4. VIDEOS</h2>
+<p class="placeholder"><strong>#Video funcionamiento servicio</strong></p>
+<p class="placeholder"><strong>#Video funcionamiento admin</strong></p>
 </body>
 </html>
